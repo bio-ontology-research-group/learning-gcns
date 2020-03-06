@@ -3,6 +3,7 @@ import csv
 import torch_geometric.utils as util
 import gzip
 import os
+from random import shuffle, randint
 import torch
 import torch.nn.functional as F
 from torch_geometric.data import Data
@@ -11,8 +12,10 @@ from gcn import MyGCNConv
 
 # constants, config
 
-BATCHSIZE = 10
-
+BATCHSIZE = 50
+FILTERS = 32
+EPOCHS = 300
+MASKCOUNT = 250
 
 # read protein interactions
 
@@ -75,9 +78,12 @@ network = util.from_networkx(G)
 
 dataset_plain = []
 count = 0
+print("Reading data")
 for i in [os.path.join(dp, f) for dp, dn, fn in os.walk(os.path.expanduser("cancer/")) for f in fn]:
-    if str(i).find("FPKM-UQ") > -1 and count < 20:
+    if str(i).find("FPKM-UQ") > -1 and count < 500:
         count += 1
+        if count % 20 == 0:
+            print(str(count) + " files read")
         file = gzip.open(i, mode="rt")
         csvobj = csv.reader(file, delimiter = '\t')
         localX = torch.zeros(network.num_nodes,1)
@@ -93,6 +99,7 @@ for i in [os.path.join(dp, f) for dp, dn, fn in os.walk(os.path.expanduser("canc
                 continue
         dataset_plain.append(localX)
 
+print("Normalizing data")
 # normalize
 maxval = torch.max(torch.stack(dataset_plain))
 dataset_plain = [t / maxval for t in dataset_plain]
@@ -103,8 +110,9 @@ dataset_plain = [t / maxval for t in dataset_plain]
 class Net(torch.nn.Module):
     def __init__(self, edge_index, num_nodes):
         super(Net, self).__init__()
-        self.conv1 = MyGCNConv(1, 8, edge_index, num_nodes, node_dim = 1)
-        self.conv2 = MyGCNConv(8, 1, edge_index, num_nodes, node_dim = 1 )
+        self.conv1 = MyGCNConv(1, FILTERS, edge_index, num_nodes, node_dim = 1)
+        self.conv2 = MyGCNConv(FILTERS, FILTERS, edge_index, num_nodes, node_dim = 1)
+        self.conv3 = MyGCNConv(FILTERS, 1, edge_index, num_nodes, node_dim = 1 )
 
     def forward(self, data):
         x = data
@@ -112,41 +120,45 @@ class Net(torch.nn.Module):
         x = F.relu(x)
         x = F.dropout(x, training=self.training)
         x = self.conv2(x)
+        x = F.relu(x)
+        x = F.dropout(x, training=self.training)
+        x = self.conv3(x)
         out = torch.sigmoid(x)
         return out
 
 
 # generate masks; TODO: add validation
-    
-trainmask = torch.zeros(BATCHSIZE, network.num_nodes).bool().random_(0, 10)
-testmask = torch.ones(BATCHSIZE, network.num_nodes).bool()
-validationmask = torch.ones(BATCHSIZE, network.num_nodes).bool()
-for i in range(0, BATCHSIZE - 1):
-    for j in range(0, network.num_nodes):
-        if trainmask[i][j]:
-            testmask[i][j] = False
-        else:
-            testmask[i][j] = True
 
+masks = []
+for i in range(MASKCOUNT):
+    trainmask = torch.zeros(BATCHSIZE, network.num_nodes).bool().random_(0, 10) # 90% true, 10% false (0)
+    testmask = torch.ones(BATCHSIZE, network.num_nodes).bool() ^ trainmask # xor
+    masks.append((trainmask, testmask))
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print("Using device " + str(device))
+
+
 loader = DataLoader(dataset_plain, batch_size = BATCHSIZE, shuffle = True, pin_memory = True)
 
-model = Net(network.edge_index, network.num_nodes).to(device)
-optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-3)
+model = Net(network.edge_index.to(device), network.num_nodes).to(device)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
 
-for epoch in range(10):
+for epoch in range(EPOCHS):
     for batch in loader:
         batch = batch.to(device)
         model.train()
         optimizer.zero_grad()
         out = model(batch)
+        currentmask = masks[randint(0, MASKCOUNT-1)]
+        trainmask = currentmask[0] # the trainmask
+        trainmask = trainmask[0:len(batch)]
         loss = F.mse_loss(out[trainmask], batch[trainmask])
         loss.backward()
         optimizer.step()
-    if epoch % 2 == 0:
+    if epoch % 10 == 0:
         out = model(batch)
+        testmask = testmask[0:len(batch)]
         testloss = F.mse_loss(out[testmask], batch[testmask])
         print("Epoch " + str(epoch) + ": " + str(testloss))
 
