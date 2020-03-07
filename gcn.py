@@ -44,9 +44,10 @@ class MyGCNConv(MessagePassing):
             edge_weight = torch.ones((edge_index.size(1), ), dtype=dtype,
                                      device=edge_index.device)
 
-        fill_value = 1 if not improved else 2
-        edge_index, edge_weight = add_remaining_self_loops(
-            edge_index, edge_weight, fill_value, num_nodes)
+        # fill_value = 1 if not improved else 2
+        # do NOT add self loops
+        #edge_index, edge_weight = add_remaining_self_loops(
+        #    edge_index, edge_weight, fill_value, num_nodes)
 
         row, col = edge_index
         deg = scatter_add(edge_weight, row, dim=0, dim_size=num_nodes)
@@ -58,7 +59,8 @@ class MyGCNConv(MessagePassing):
     def forward(self, x, edge_weight=None):
         """"""
         x = torch.matmul(x, self.weight)
-        return self.propagate(self.edge_index, x=x, norm=self.norm)
+        x = self.propagate(self.edge_index, x=x, norm=self.norm)
+        return x
 
     def message(self, x_j, norm):
         return norm.view(-1, 1) * x_j if norm is not None else x_j
