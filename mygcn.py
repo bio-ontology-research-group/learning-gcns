@@ -137,17 +137,17 @@ class Net(torch.nn.Module):
 
 masks = []
 for i in range(MASKCOUNT):
-    trainmask = torch.zeros(BATCHSIZE, network.num_nodes).bool().random_(0, 10) # 90% true, 10% false (0)
-    testmask = torch.ones(BATCHSIZE, network.num_nodes).bool() ^ trainmask # xor
-    masks.append((trainmask, testmask))
+    trainmask = torch.zeros(BATCHSIZE, network.num_nodes).bool().random_(0, 10).float() # 90% true, 10% false
+    # testmask = torch.ones(BATCHSIZE, network.num_nodes).bool() ^ trainmask # xor
+    masks.append(trainmask)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print("Using device " + str(device))
 
 
 loader = DataLoader(trainset, batch_size = BATCHSIZE, shuffle = True, pin_memory = True)
-validationloader = DataLoader(validationset, batch_size = BATCHSIZE, shuffle = True, pin_memory = True)
-testloader = DataLoader(testset, batch_size = BATCHSIZE, shuffle = True, pin_memory = True)
+validationloader = DataLoader(validationset, batch_size = BATCHSIZE, shuffle = True)
+testloader = DataLoader(testset, batch_size = BATCHSIZE, shuffle = True)
 
 model = Net(network.edge_index.to(device), network.num_nodes).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
@@ -158,9 +158,7 @@ for epoch in range(EPOCHS):
         model.train()
         optimizer.zero_grad()
         out = model(batch)
-        # chose a random mask from the set of masks
-        currentmask = masks[randint(0, MASKCOUNT-1)]
-        trainmask = currentmask[0] # the trainmask
+        trainmask = masks[randint(0, MASKCOUNT-1)] # chose a random mask from the set of masks, use for this batch
         trainmask = trainmask[0:len(batch)]
         loss = F.mse_loss(out[trainmask], batch[trainmask])
         loss.backward()
