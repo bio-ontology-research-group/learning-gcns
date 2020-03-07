@@ -18,8 +18,8 @@ from earlystopping import EarlyStopping
 BATCHSIZE = 20
 VALBATCHSIZE = 10
 FILTERS = 32
-EPOCHS = 300
-MASKCOUNT = 2500 # number of masks; actual masks are MASKCOUNT * BATCHSIZE
+EPOCHS = 500
+MASKCOUNT = 5000 # number of masks; actual masks are MASKCOUNT * BATCHSIZE
 PATIENCE = 20
 
 tcgafile = open('/ibex/scratch/projects/c2014/tcga/all.pickle', 'rb')
@@ -130,3 +130,4 @@ for epoch in range(EPOCHS):
 
 # load the last checkpoint with the best model
 model.load_state_dict(torch.load('checkpoint.pt'))
+torch.save(model.state_dict(), 'tcga.pt')
