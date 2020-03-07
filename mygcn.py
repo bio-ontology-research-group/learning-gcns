@@ -11,13 +11,16 @@ import torch.nn.functional as F
 from torch_geometric.data import Data
 from torch.utils.data import DataLoader
 from gcn import MyGCNConv
+import numpy as np
+from earlystopping import EarlyStopping
 
 # constants, config
 BATCHSIZE = 20
 VALBATCHSIZE = 10
 FILTERS = 32
 EPOCHS = 300
-MASKCOUNT = 250
+MASKCOUNT = 2500 # number of masks; actual masks are MASKCOUNT * BATCHSIZE
+PATIENCE = 20
 
 tcgafile = open('/ibex/scratch/projects/c2014/tcga/all.pickle', 'rb')
 dataset_plain, network, gene2protein, node2id = pickle.load(tcgafile)
@@ -30,8 +33,8 @@ dataset_plain = [t / maxval for t in dataset_plain]
 
 shuffle(dataset_plain)
 trainset = dataset_plain[:int((len(dataset_plain)+1)*.90)]
-testset = dataset_plain[int(len(dataset_plain)*.90+1):int(len(dataset_plain)*.98)]
-validationset = dataset_plain[int(len(dataset_plain)*.98+1):]
+testset = dataset_plain[int(len(dataset_plain)*.90+1):int(len(dataset_plain)*.95)]
+validationset = dataset_plain[int(len(dataset_plain)*.95+1):]
 
 # define the model layout -> use custom GCN model
 
@@ -59,8 +62,8 @@ class Net(torch.nn.Module):
 
 masks = []
 for i in range(MASKCOUNT):
-    trainmask = torch.zeros(BATCHSIZE, network.num_nodes).bool().random_(0, 10) # 90% true, 10% false
-    testmask = torch.ones(BATCHSIZE, network.num_nodes).bool() ^ trainmask # xor
+    trainmask = torch.zeros(BATCHSIZE, network.num_nodes, 1).bool().random_(0, 10) # 90% true, 10% false
+    testmask = torch.ones(BATCHSIZE, network.num_nodes, 1).bool() ^ trainmask # xor
     masks.append((trainmask, testmask))
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -74,24 +77,56 @@ testloader = DataLoader(testset, batch_size = VALBATCHSIZE)
 model = Net(network.edge_index.to(device), network.num_nodes).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
 
+# to track the training loss as the model trains
+train_losses = []
+# to track the validation loss as the model trains
+valid_losses = []
+# to track the average training loss per epoch as the model trains
+avg_train_losses = []
+# to track the average validation loss per epoch as the model trains
+avg_valid_losses = [] 
+early_stopping = EarlyStopping(patience=PATIENCE, verbose=True)
+
+
 for epoch in range(EPOCHS):
     for batch in loader:
         model.train()
         batch = batch.to(device)
         optimizer.zero_grad()
         trainmask, testmask = masks[randint(0, MASKCOUNT-1)] # chose a random mask from the set of masks, use for this batch
-        trainmask = trainmask[0:len(batch)] 
-        testmask = testmask[0:len(batch)] 
-        batch *= trainmask # zero the training nodes in this batch
+        trainmask = trainmask[0:len(batch)].to(device)
+        testmask = testmask[0:len(batch)].to(device)
+        batch *= trainmask # mask (set to zero) the features of the training nodes in this batch
         out = model(batch)
-        loss = F.mse_loss(out[testmask], batch[testmask])
+        loss = F.mse_loss(out[testmask], batch[testmask]) # compute loss over the nodes previously hidden
         loss.backward()
         optimizer.step()
-    if epoch % 2 == 0:
-        validationloss = 0.0
-        for valbatch in validationloader:
-            valbatch = valbatch.to(device)
-            vout = model(valbatch)
-            validationloss += F.mse_loss(vout, valbatch)
-        print("Epoch " + str(epoch) + ": " + str(validationloss))
+        train_losses.append(loss.item())
 
+    # validate the model
+    validationloss = 0.0
+    for valbatch in validationloader:
+        valbatch = valbatch.to(device)
+        vout = model(valbatch)
+        validationloss += F.mse_loss(vout, valbatch)
+    valid_losses.append(validationloss.item())
+
+    train_loss = np.average(train_losses)
+    valid_loss = np.average(valid_losses)
+    avg_train_losses.append(train_loss)
+    avg_valid_losses.append(valid_loss)
+    epoch_len = len(str(EPOCHS))
+    print_msg = (f'[{epoch:>{epoch_len}}/{EPOCHS:>{epoch_len}}] ' +
+                 f'train_loss: {train_loss:.5f} ' +
+                 f'valid_loss: {valid_loss:.5f}')
+    print(print_msg)
+    # clear lists to track next epoch
+    train_losses = []
+    valid_losses = []
+    early_stopping(valid_loss, model)
+    if early_stopping.early_stop:
+        print("Early stopping")
+        break
+
+# load the last checkpoint with the best model
+model.load_state_dict(torch.load('checkpoint.pt'))
