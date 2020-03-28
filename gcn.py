@@ -44,8 +44,7 @@ class MyGCNConv(MessagePassing):
             edge_weight = torch.ones((edge_index.size(1), ), dtype=dtype,
                                      device=edge_index.device)
 
-        # fill_value = 1 if not improved else 2
-        # do NOT add self loops
+        #fill_value = 1 if not improved else 2
         #edge_index, edge_weight = add_remaining_self_loops(
         #    edge_index, edge_weight, fill_value, num_nodes)
 

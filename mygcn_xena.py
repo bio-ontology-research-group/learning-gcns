@@ -13,38 +13,53 @@ from torch.utils.data import DataLoader
 from gcn import MyGCNConv
 import numpy as np
 from earlystopping import EarlyStopping
+import pandas
 
 # constants, config
 BATCHSIZE = 10
 VALBATCHSIZE = 10
 FILTERS = 150
 EPOCHS = 500
-MASKCOUNT = 5000 # number of masks; actual masks are MASKCOUNT * BATCHSIZE
+MASKCOUNT = 500 # number of masks; actual masks are MASKCOUNT * BATCHSIZE
 PATIENCE = 20
 
 tcgafile = open('/ibex/scratch/projects/c2014/tcga/all.pickle', 'rb')
-dataset_plain, network, gene2protein, node2id = pickle.load(tcgafile)
+_, network, gene2protein, node2id = pickle.load(tcgafile)
+tcgafile = open('/ibex/scratch/projects/c2014/tcga/xena/tpm_all_df.pickle', 'rb')
+_, df, df_quantile, df_row, df_col = pickle.load(tcgafile)
+
+dataall = torch.stack( [torch.tensor(df.values), torch.tensor(df_quantile.values), torch.tensor(df_row.values), torch.tensor(df_col.values)] , dim=2)
+
+df_quantile.index = list(map(lambda x: x.split(".")[0], df_quantile.index)) # fix the df_quantile naming bug
+
+id2node = { v: k for k, v in node2id.items() }
+protein2gene = { v: k for k, v in gene2protein.items() }
+
+dataset = torch.zeros(network.num_nodes, len(df.columns), 4) # number samples x number genes x number features
+count = 0
+for idx, row in enumerate(df.index):
+    if row in gene2protein and gene2protein[row] in node2id:
+        row_num = node2id[gene2protein[row]]
+        dataset[row_num] = dataall[idx]
 
 
-print("Normalizing data")
-# normalize
-maxval = torch.max(torch.stack(dataset_plain))
-dataset_plain = [t / maxval for t in dataset_plain]
+dataset_plain = torch.transpose(dataset, 0, 1)
 
-shuffle(dataset_plain)
 trainset = dataset_plain[:int((len(dataset_plain)+1)*.90)]
 testset = dataset_plain[int(len(dataset_plain)*.90+1):int(len(dataset_plain)*.95)]
 validationset = dataset_plain[int(len(dataset_plain)*.95+1):]
+
+print("Training/testing/validation sets ready")
 
 # define the model layout -> use custom GCN model
 
 class Net(torch.nn.Module):
     def __init__(self, edge_index, num_nodes):
         super(Net, self).__init__()
-        self.conv1 = MyGCNConv(1, FILTERS, edge_index, num_nodes, node_dim = 1)
+        self.conv1 = MyGCNConv(4, FILTERS, edge_index, num_nodes, node_dim = 1)
         self.conv2 = MyGCNConv(FILTERS, FILTERS, edge_index, num_nodes, node_dim = 1)
-        self.conv3 = MyGCNConv(FILTERS, FILTERS, edge_index, num_nodes, node_dim = 1)
-        self.conv4 = MyGCNConv(FILTERS, 1, edge_index, num_nodes, node_dim = 1 )
+        #self.conv3 = MyGCNConv(FILTERS, FILTERS, edge_index, num_nodes, node_dim = 1)
+        self.conv3 = MyGCNConv(FILTERS, 4, edge_index, num_nodes, node_dim = 1 )
 
     def forward(self, data):
         x = data
@@ -55,20 +70,22 @@ class Net(torch.nn.Module):
         x = F.relu(x)
         x = F.dropout(x, training=self.training)
         x = self.conv3(x)
-        x = F.relu(x)
-        x = F.dropout(x, training=self.training)
-        x = self.conv4(x)
         out = torch.sigmoid(x)
         return out
 
 
 # generate masks; TODO: add validation (some nodes never seen?)
 
+
 masks = []
 for i in range(MASKCOUNT):
-    trainmask = torch.zeros(BATCHSIZE, network.num_nodes, 1).bool().random_(0, 20) # 95% true, 5% false
-    testmask = torch.ones(BATCHSIZE, network.num_nodes, 1).bool() ^ trainmask # xor
+    trainmask = torch.zeros(BATCHSIZE, network.num_nodes).bool().random_(0, 20) # 95% true, 5% false
+    testmask = torch.ones(BATCHSIZE, network.num_nodes).bool() ^ trainmask # xor
+    trainmask = torch.stack([trainmask, trainmask, trainmask, trainmask], dim=2)
+    testmask = torch.stack([testmask, testmask, testmask, testmask], dim=2)
     masks.append((trainmask, testmask))
+
+print("Mask sets ready")
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print("Using device " + str(device))
@@ -78,6 +95,8 @@ cpu = torch.device('cpu')
 loader = DataLoader(trainset, batch_size = BATCHSIZE, pin_memory = True)
 validationloader = DataLoader(validationset, batch_size = VALBATCHSIZE, pin_memory = True)
 testloader = DataLoader(testset, batch_size = VALBATCHSIZE, pin_memory = True)
+
+print("Loaders ready")
 
 model = Net(network.edge_index.to(device), network.num_nodes).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
@@ -92,6 +111,7 @@ avg_train_losses = []
 avg_valid_losses = [] 
 early_stopping = EarlyStopping(patience=PATIENCE, verbose=True)
 
+print("Starting training")
 
 for epoch in range(EPOCHS):
     for batch in loader:
